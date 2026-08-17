@@ -27,7 +27,17 @@ export async function cashfreeRequest<T>(credentials: CashfreeCredentials, path:
     cache: "no-store",
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error("CASHFREE_PROVIDER_ERROR");
+  if (!response.ok) {
+    // Log only provider-safe diagnostics. Never log request headers because
+    // they contain the Cashfree secret key.
+    const details = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    console.error("Cashfree API request rejected", {
+      status: response.status,
+      code: String(details.code || details.type || "").slice(0, 120),
+      message: String(details.message || details.error || "").slice(0, 300),
+    });
+    throw new Error(`CASHFREE_PROVIDER_${response.status}`);
+  }
   return payload as T;
 }
 
