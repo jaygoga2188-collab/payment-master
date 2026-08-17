@@ -36,6 +36,12 @@ function status(value: unknown) { const item = cleanText(value, 10); if (item !=
 function cashfreeMode(value: unknown) { const item = cleanText(value, 12); if (item !== "sandbox" && item !== "production") throw new Error("Cashfree mode must be sandbox or production."); return item; }
 function provider(value: unknown) { const item = cleanText(value, 16) || "razorpay"; if (item !== "razorpay" && item !== "cashfree") throw new Error("Select Razorpay or Cashfree."); return item as "razorpay" | "cashfree"; }
 function apiVersion(value: unknown) { const item = cleanText(value, 20) || "2025-01-01"; if (!/^20\d{2}-\d{2}-\d{2}$/.test(item)) throw new Error("Cashfree API version is invalid."); return item; }
+function reportDate(value?: string | null) {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const selected = cleanText(value, 10) || today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(selected) || Number.isNaN(Date.parse(`${selected}T00:00:00Z`))) throw new Error("Invalid report date.");
+  return selected;
+}
 
 export async function createAccount(input: Record<string, unknown>) {
   await ensureSchema();
@@ -231,17 +237,25 @@ export async function bulkAssignWebsiteIds(value: unknown, accountIdValue: unkno
   return ids;
 }
 
-export async function managerData() {
+export async function managerData(selectedDate?: string | null) {
   await ensureSchema();
-  const [accounts, cashfreeAccounts, websites, transactions, logs, metrics] = await Promise.all([
+  const selectedReportDate = reportDate(selectedDate);
+  const [accounts, cashfreeAccounts, websites, transactions, logs, metrics, collectionSummary, collectionBySite] = await Promise.all([
     sql`SELECT a.id, a.account_name, a.key_id, a.mode, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM razorpay_accounts a LEFT JOIN websites w ON w.razorpay_account_id = a.id GROUP BY a.id ORDER BY a.created_at DESC`,
     sql`SELECT a.id, a.account_name, a.app_id, a.mode, a.api_version, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM cashfree_accounts a LEFT JOIN websites w ON w.cashfree_account_id = a.id GROUP BY a.id ORDER BY a.created_at DESC`,
     sql`SELECT w.id, w.name, w.domain, w.site_code, w.status, w.payment_provider, w.razorpay_account_id, w.cashfree_account_id, w.created_at, w.updated_at, r.account_name AS razorpay_account_name, c.account_name AS cashfree_account_name FROM websites w LEFT JOIN razorpay_accounts r ON r.id = w.razorpay_account_id LEFT JOIN cashfree_accounts c ON c.id = w.cashfree_account_id ORDER BY w.created_at DESC`,
     sql`SELECT * FROM (SELECT t.id, t.internal_order_id, t.razorpay_order_id AS provider_order_id, t.razorpay_payment_link_id AS provider_link_id, t.razorpay_payment_id AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'razorpay'::text AS provider FROM payment_transactions t JOIN websites w ON w.id = t.website_id JOIN razorpay_accounts a ON a.id = t.razorpay_account_id UNION ALL SELECT t.id, t.internal_order_id, t.cashfree_order_id AS provider_order_id, NULL::text AS provider_link_id, NULL::text AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'cashfree'::text AS provider FROM cashfree_transactions t JOIN websites w ON w.id = t.website_id JOIN cashfree_accounts a ON a.id = t.cashfree_account_id) tx ORDER BY created_at DESC LIMIT 100`,
     sql`SELECT l.id, l.action, l.entity_type, l.entity_id, l.message, l.created_at, u.email AS admin_email FROM audit_logs l LEFT JOIN admin_users u ON u.id = l.admin_user_id ORDER BY l.created_at DESC LIMIT 100`,
     sql`SELECT (SELECT count(*)::int FROM websites) AS websites, (SELECT count(*)::int FROM websites WHERE status = 'active') AS active_websites, ((SELECT count(*)::int FROM razorpay_accounts) + (SELECT count(*)::int FROM cashfree_accounts)) AS accounts, ((SELECT count(*)::int FROM razorpay_accounts WHERE status = 'active') + (SELECT count(*)::int FROM cashfree_accounts WHERE status = 'active')) AS active_accounts, ((SELECT count(*)::int FROM payment_transactions WHERE created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE created_at >= date_trunc('day', now()))) AS today_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now()))) AS successful_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now()))) AS failed_payments`,
+    sql`SELECT provider, count(*)::int AS payment_count, coalesce(sum(amount_paise), 0)::bigint AS amount_paise FROM (SELECT 'razorpay'::text AS provider, amount_paise, updated_at FROM payment_transactions WHERE status = 'paid' UNION ALL SELECT 'cashfree'::text AS provider, amount_paise, updated_at FROM cashfree_transactions WHERE status = 'paid') paid WHERE (paid.updated_at AT TIME ZONE 'Asia/Kolkata')::date = ${selectedReportDate}::date GROUP BY provider`,
+    sql`SELECT website_name, provider, count(*)::int AS payment_count, coalesce(sum(amount_paise), 0)::bigint AS amount_paise FROM (SELECT w.name AS website_name, 'razorpay'::text AS provider, t.amount_paise, t.updated_at FROM payment_transactions t JOIN websites w ON w.id = t.website_id WHERE t.status = 'paid' UNION ALL SELECT w.name AS website_name, 'cashfree'::text AS provider, t.amount_paise, t.updated_at FROM cashfree_transactions t JOIN websites w ON w.id = t.website_id WHERE t.status = 'paid') paid WHERE (paid.updated_at AT TIME ZONE 'Asia/Kolkata')::date = ${selectedReportDate}::date GROUP BY website_name, provider ORDER BY amount_paise DESC, website_name ASC`,
   ]);
-  return { accounts, cashfreeAccounts, websites, transactions, logs, metrics: metrics[0] || {} };
+  const summary = { razorpay_amount_paise: 0, razorpay_payments: 0, cashfree_amount_paise: 0, cashfree_payments: 0 };
+  for (const row of collectionSummary as { provider: string; amount_paise: number; payment_count: number }[]) {
+    if (row.provider === "razorpay") { summary.razorpay_amount_paise = Number(row.amount_paise || 0); summary.razorpay_payments = Number(row.payment_count || 0); }
+    if (row.provider === "cashfree") { summary.cashfree_amount_paise = Number(row.amount_paise || 0); summary.cashfree_payments = Number(row.payment_count || 0); }
+  }
+  return { accounts, cashfreeAccounts, websites, transactions, logs, metrics: metrics[0] || {}, collection: { date: selectedReportDate, ...summary, total_amount_paise: summary.razorpay_amount_paise + summary.cashfree_amount_paise, total_payments: summary.razorpay_payments + summary.cashfree_payments }, collectionBySite };
 }
 
 export async function authenticateSite(request: NextRequest, rawBody: string, expectedPath: string) {
