@@ -57,13 +57,17 @@ async function createCashfreeCentralPayment(website: { id: string; site_code: st
   const customerInput = (body.customer && typeof body.customer === "object" ? body.customer : {}) as Record<string, unknown>;
   const phone = text(customerInput.contact || customerInput.phone, 15).replace(/\D/g, "").slice(-10);
   if (!/^\d{10}$/.test(phone)) throw new Error("INVALID_PAYMENT_REQUEST");
-  const customer: Record<string, string> = { customer_id: `pm_${website.id.slice(0, 8)}_${phone}`, customer_phone: phone };
-  const customerName = text(customerInput.name, 80); const customerEmail = text(customerInput.email, 160);
-  if (customerName) customer.customer_name = customerName; if (customerEmail.includes("@")) customer.customer_email = customerEmail;
+  // This is deliberately the same data shape as the existing Cashfree
+  // 2022 hosted-link integration used by the sites before Payment Master.
+  const customer: Record<string, string> = {
+    customer_id: `customer_${phone}`,
+    customer_name: text(customerInput.name, 100) || "Customer",
+    customer_phone: phone,
+  };
   const returnUrl = allowedCallback(body.callback_url, website.domain);
   const payload = await cashfreeRequest<{ order_id: string; order_status: string; payment_session_id?: string; payment_link?: string }>(
     { appId: credentials.appId, secretKey: credentials.secretKey, mode: credentials.mode, apiVersion: credentials.apiVersion }, "/orders",
-    { method: "POST", headers: { "x-idempotency-key": txId }, body: JSON.stringify({ order_id: cashfreeOrderId, order_amount: amountPaise / 100, order_currency: paymentCurrency, customer_details: customer, order_meta: { return_url: returnUrl }, order_note: text(body.description, 255) || "Order payment", order_tags: { website: website.site_code, internal_order_id: internalOrderId } }) },
+    { method: "POST", body: JSON.stringify({ order_id: cashfreeOrderId, order_amount: amountPaise / 100, order_currency: paymentCurrency, customer_details: customer, order_meta: { return_url: returnUrl }, order_note: text(body.description, 450) || "Order payment" }) },
   );
   if (payload.order_id !== cashfreeOrderId) throw new Error("PAYMENT_PROVIDER_ERROR");
   const hosted = payload.payment_link ? new URL(payload.payment_link) : null;

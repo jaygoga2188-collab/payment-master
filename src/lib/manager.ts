@@ -35,7 +35,10 @@ function mode(value: unknown) { const item = cleanText(value, 8); if (item !== "
 function status(value: unknown) { const item = cleanText(value, 10); if (item !== "active" && item !== "inactive") throw new Error("Status must be active or inactive."); return item; }
 function cashfreeMode(value: unknown) { const item = cleanText(value, 12); if (item !== "sandbox" && item !== "production") throw new Error("Cashfree mode must be sandbox or production."); return item; }
 function provider(value: unknown) { const item = cleanText(value, 16) || "razorpay"; if (item !== "razorpay" && item !== "cashfree") throw new Error("Select Razorpay or Cashfree."); return item as "razorpay" | "cashfree"; }
-function apiVersion(value: unknown) { const item = cleanText(value, 20) || "2025-01-01"; if (!/^20\d{2}-\d{2}-\d{2}$/.test(item)) throw new Error("Cashfree API version is invalid."); return item; }
+// Keep the Cashfree integration aligned with the established hosted-link flow.
+// Individual accounts can still retain another version when that is explicitly
+// configured in the admin panel.
+function apiVersion(value: unknown) { const item = cleanText(value, 20) || "2022-01-01"; if (!/^20\d{2}-\d{2}-\d{2}$/.test(item)) throw new Error("Cashfree API version is invalid."); return item; }
 function reportDate(value?: string | null) {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const selected = cleanText(value, 10) || today;
