@@ -18,6 +18,13 @@ function text(value: unknown, max = 255) { return String(value || "").trim().sli
 function amount(value: unknown) { const number = Number(value); if (!Number.isSafeInteger(number) || number < 100) throw new Error("INVALID_PAYMENT_REQUEST"); return number; }
 function currency(value: unknown) { const result = text(value || "INR", 3).toUpperCase(); if (result !== "INR") throw new Error("INVALID_PAYMENT_REQUEST"); return result; }
 function orderId(value: unknown) { const result = text(value, 128); if (!/^[A-Za-z0-9_-]{6,128}$/.test(result)) throw new Error("INVALID_PAYMENT_REQUEST"); return result; }
+function expiry(value: unknown) {
+  if (value === undefined || value === null || value === "") return null;
+  const result = Number(value);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(result) || result < now + 60 || result > now + 7 * 24 * 60 * 60) throw new Error("INVALID_PAYMENT_REQUEST");
+  return result;
+}
 function domainFromUrl(value: string) { try { const url = new URL(value); return url.protocol === "https:" ? url.host.toLowerCase() : ""; } catch { return ""; } }
 function allowedCallback(value: unknown, domain: string) { const url = text(value, 1024); if (!url || domainFromUrl(url) !== domain.toLowerCase()) throw new Error("INVALID_CALLBACK_URL"); return url; }
 function publicTransaction(row: Transaction, keyId: string) {
@@ -92,9 +99,12 @@ export async function createCentralPayment(request: NextRequest, rawBody: string
     const name = text(customerInput.name, 80); if (name) customer.name = name;
     const contact = text(customerInput.contact, 15).replace(/\D/g, ""); if (/^\d{10}$/.test(contact)) customer.contact = `+91${contact}`;
     const email = text(customerInput.email, 160); if (email.includes("@")) customer.email = email;
+    const expiresAt = expiry(body.expire_by);
+    const paymentLinkBody: Record<string, unknown> = { amount: amountPaise, currency: paymentCurrency, accept_partial: false, reference_id: internalOrderId, description: text(body.description, 255) || "Order payment", customer, notify: { sms: false, email: false }, reminder_enable: false, callback_url: callbackUrl, callback_method: "get", notes: { website: website.site_code, internal_order_id: internalOrderId } };
+    if (expiresAt) paymentLinkBody.expire_by = expiresAt;
     const link = await razorpayRequest<{ id: string; short_url: string; status: string }>(credentials, "/payment_links/", {
       method: "POST",
-      body: JSON.stringify({ amount: amountPaise, currency: paymentCurrency, accept_partial: false, reference_id: internalOrderId, description: text(body.description, 255) || "Order payment", customer, notify: { sms: false, email: false }, reminder_enable: false, callback_url: callbackUrl, callback_method: "get", notes: { website: website.site_code, internal_order_id: internalOrderId } }),
+      body: JSON.stringify(paymentLinkBody),
     });
     const hosted = new URL(link.short_url);
     if (hosted.protocol !== "https:" || hosted.hostname !== "rzp.io") throw new Error("PAYMENT_PROVIDER_ERROR");
