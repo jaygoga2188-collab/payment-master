@@ -14,20 +14,23 @@ function baseUrl(mode: CashfreeCredentials["mode"]) {
   return mode === "production" ? "https://api.cashfree.com/pg" : "https://sandbox.cashfree.com/pg";
 }
 
-export async function cashfreeRequest<T>(credentials: CashfreeCredentials, path: string, init: RequestInit = {}) {
+type CashfreeRequestInit = RequestInit & { acceptedErrorStatuses?: number[] };
+
+export async function cashfreeRequest<T>(credentials: CashfreeCredentials, path: string, init: CashfreeRequestInit = {}) {
+  const { acceptedErrorStatuses = [], ...requestInit } = init;
   const response = await fetch(`${baseUrl(credentials.mode)}${path}`, {
-    ...init,
+    ...requestInit,
     headers: {
       "Content-Type": "application/json",
       "x-api-version": credentials.apiVersion,
       "x-client-id": credentials.appId,
       "x-client-secret": credentials.secretKey,
-      ...(init.headers || {}),
+      ...(requestInit.headers || {}),
     },
     cache: "no-store",
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  if (!response.ok && !acceptedErrorStatuses.includes(response.status)) {
     // Log only provider-safe diagnostics. Never log request headers because
     // they contain the Cashfree secret key.
     const details = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
