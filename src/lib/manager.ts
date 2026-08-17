@@ -11,7 +11,9 @@ type AccountRow = {
 };
 
 type CredentialRow = { id: string; razorpay_account_id: string; key_id: string; encrypted_key_secret: string; encrypted_webhook_secret: string | null; version_number: number; status: string };
-type WebsiteRow = { id: string; name: string; domain: string; site_code: string; encrypted_auth_secret: string; status: "active" | "inactive"; razorpay_account_id: string | null; created_at: string; updated_at: string };
+type CashfreeAccountRow = { id: string; account_name: string; app_id: string; mode: "sandbox" | "production"; api_version: string; status: "active" | "inactive"; current_credential_version_id: string | null; created_at: string; updated_at: string };
+type CashfreeCredentialRow = { id: string; cashfree_account_id: string; app_id: string; encrypted_secret_key: string; encrypted_webhook_secret: string | null; version_number: number; status: string };
+type WebsiteRow = { id: string; name: string; domain: string; site_code: string; encrypted_auth_secret: string; status: "active" | "inactive"; payment_provider: "razorpay" | "cashfree"; razorpay_account_id: string | null; cashfree_account_id: string | null; created_at: string; updated_at: string };
 
 function cleanText(value: unknown, max: number) { return String(value || "").trim().slice(0, max); }
 function assertDomain(value: unknown) {
@@ -31,6 +33,9 @@ function assertId(value: unknown) {
 }
 function mode(value: unknown) { const item = cleanText(value, 8); if (item !== "test" && item !== "live") throw new Error("Mode must be test or live."); return item; }
 function status(value: unknown) { const item = cleanText(value, 10); if (item !== "active" && item !== "inactive") throw new Error("Status must be active or inactive."); return item; }
+function cashfreeMode(value: unknown) { const item = cleanText(value, 12); if (item !== "sandbox" && item !== "production") throw new Error("Cashfree mode must be sandbox or production."); return item; }
+function provider(value: unknown) { const item = cleanText(value, 16) || "razorpay"; if (item !== "razorpay" && item !== "cashfree") throw new Error("Select Razorpay or Cashfree."); return item as "razorpay" | "cashfree"; }
+function apiVersion(value: unknown) { const item = cleanText(value, 20) || "2025-01-01"; if (!/^20\d{2}-\d{2}-\d{2}$/.test(item)) throw new Error("Cashfree API version is invalid."); return item; }
 
 export async function createAccount(input: Record<string, unknown>) {
   await ensureSchema();
@@ -96,15 +101,87 @@ export async function credentialForAccount(accountIdValue: unknown, versionId?: 
   return { version, keyId: version.key_id, keySecret: decryptSecret(version.encrypted_key_secret), webhookSecret: version.encrypted_webhook_secret ? decryptSecret(version.encrypted_webhook_secret) : null };
 }
 
+export async function createCashfreeAccount(input: Record<string, unknown>) {
+  await ensureSchema();
+  const accountName = cleanText(input.account_name, 100);
+  const appId = cleanText(input.app_id, 200);
+  const secret = cleanText(input.secret_key, 500);
+  const webhookSecret = cleanText(input.webhook_secret, 500) || null;
+  if (!accountName || !appId || !secret) throw new Error("Account name, Cashfree App ID and Secret Key are required.");
+  const accountId = randomUUID(); const versionId = randomUUID();
+  await sql`INSERT INTO cashfree_accounts (id, account_name, app_id, mode, api_version, status, current_credential_version_id) VALUES (${accountId}, ${accountName}, ${appId}, ${cashfreeMode(input.mode)}, ${apiVersion(input.api_version)}, ${status(input.status)}, ${versionId})`;
+  await sql`INSERT INTO cashfree_credential_versions (id, cashfree_account_id, app_id, encrypted_secret_key, encrypted_webhook_secret, version_number, status) VALUES (${versionId}, ${accountId}, ${appId}, ${encryptSecret(secret)}, ${webhookSecret ? encryptSecret(webhookSecret) : null}, 1, 'current')`;
+  return accountId;
+}
+
+export async function updateCashfreeAccount(accountIdValue: unknown, input: Record<string, unknown>) {
+  await ensureSchema();
+  const accountId = assertId(accountIdValue);
+  const rows = await sql`SELECT * FROM cashfree_accounts WHERE id = ${accountId}`;
+  const account = rows[0] as CashfreeAccountRow | undefined;
+  if (!account) throw new Error("Cashfree account not found.");
+  const accountName = cleanText(input.account_name, 100) || account.account_name;
+  const appId = cleanText(input.app_id, 200) || account.app_id;
+  const nextMode = input.mode ? cashfreeMode(input.mode) : account.mode;
+  const nextVersion = input.api_version ? apiVersion(input.api_version) : account.api_version;
+  const nextStatus = input.status ? status(input.status) : account.status;
+  const nextSecret = cleanText(input.secret_key, 500);
+  const updateWebhook = Object.hasOwn(input, "webhook_secret");
+  const webhookSecret = cleanText(input.webhook_secret, 500);
+  if (nextSecret || updateWebhook || appId !== account.app_id) {
+    const currentRows = await sql`SELECT * FROM cashfree_credential_versions WHERE id = ${account.current_credential_version_id}`;
+    const current = currentRows[0] as CashfreeCredentialRow | undefined;
+    if (!current) throw new Error("Credential version is unavailable.");
+    const versionRows = await sql`SELECT coalesce(max(version_number), 0)::int AS max FROM cashfree_credential_versions WHERE cashfree_account_id = ${accountId}`;
+    const versionId = randomUUID();
+    await sql`UPDATE cashfree_credential_versions SET status = 'retired' WHERE id = ${current.id}`;
+    await sql`INSERT INTO cashfree_credential_versions (id, cashfree_account_id, app_id, encrypted_secret_key, encrypted_webhook_secret, version_number, status) VALUES (${versionId}, ${accountId}, ${appId}, ${encryptSecret(nextSecret || decryptSecret(current.encrypted_secret_key))}, ${updateWebhook ? (webhookSecret ? encryptSecret(webhookSecret) : null) : current.encrypted_webhook_secret}, ${Number(versionRows[0]?.max || 0) + 1}, 'current')`;
+    await sql`UPDATE cashfree_accounts SET account_name = ${accountName}, app_id = ${appId}, mode = ${nextMode}, api_version = ${nextVersion}, status = ${nextStatus}, current_credential_version_id = ${versionId}, updated_at = now() WHERE id = ${accountId}`;
+  } else {
+    await sql`UPDATE cashfree_accounts SET account_name = ${accountName}, app_id = ${appId}, mode = ${nextMode}, api_version = ${nextVersion}, status = ${nextStatus}, updated_at = now() WHERE id = ${accountId}`;
+  }
+  return accountId;
+}
+
+export async function deleteCashfreeAccount(accountIdValue: unknown) {
+  await ensureSchema();
+  const accountId = assertId(accountIdValue);
+  const [assigned, transactions] = await Promise.all([
+    sql`SELECT count(*)::int AS count FROM websites WHERE cashfree_account_id = ${accountId}`,
+    sql`SELECT count(*)::int AS count FROM cashfree_transactions WHERE cashfree_account_id = ${accountId}`,
+  ]);
+  if (Number(assigned[0]?.count || 0) || Number(transactions[0]?.count || 0)) throw new Error("Unassign websites and retain transaction history before deleting this account.");
+  await sql`DELETE FROM cashfree_credential_versions WHERE cashfree_account_id = ${accountId}`;
+  await sql`DELETE FROM cashfree_accounts WHERE id = ${accountId}`;
+}
+
+export async function cashfreeCredentialForAccount(accountIdValue: unknown, versionId?: string | null) {
+  await ensureSchema();
+  const accountId = assertId(accountIdValue);
+  const versionRows = versionId
+    ? await sql`SELECT * FROM cashfree_credential_versions WHERE id = ${versionId} AND cashfree_account_id = ${accountId}`
+    : await sql`SELECT v.* FROM cashfree_accounts a JOIN cashfree_credential_versions v ON v.id = a.current_credential_version_id WHERE a.id = ${accountId}`;
+  const version = versionRows[0] as CashfreeCredentialRow | undefined;
+  const accountRows = await sql`SELECT * FROM cashfree_accounts WHERE id = ${accountId}`;
+  const account = accountRows[0] as CashfreeAccountRow | undefined;
+  if (!version || !account) throw new Error("Credentials are unavailable.");
+  return { version, appId: version.app_id, secretKey: decryptSecret(version.encrypted_secret_key), webhookSecret: version.encrypted_webhook_secret ? decryptSecret(version.encrypted_webhook_secret) : null, mode: account.mode, apiVersion: account.api_version };
+}
+
 export async function createWebsite(input: Record<string, unknown>) {
   await ensureSchema();
   const name = cleanText(input.name, 120);
   if (!name) throw new Error("Website name is required.");
   const id = randomUUID();
   const secret = newToken();
-  const assignment = cleanText(input.razorpay_account_id, 80) || null;
-  if (assignment) assertId(assignment);
-  await sql`INSERT INTO websites (id, name, domain, site_code, encrypted_auth_secret, status, razorpay_account_id) VALUES (${id}, ${name}, ${assertDomain(input.domain)}, ${assertSiteCode(input.site_code)}, ${encryptSecret(secret)}, ${status(input.status || 'active')}, ${assignment})`;
+  const paymentProvider = provider(input.payment_provider);
+  const razorpayAssignment = cleanText(input.razorpay_account_id, 80) || null;
+  const cashfreeAssignment = cleanText(input.cashfree_account_id, 80) || null;
+  if (razorpayAssignment) assertId(razorpayAssignment);
+  if (cashfreeAssignment) assertId(cashfreeAssignment);
+  if (paymentProvider === "razorpay" && !razorpayAssignment) throw new Error("Assign an active Razorpay account.");
+  if (paymentProvider === "cashfree" && !cashfreeAssignment) throw new Error("Assign an active Cashfree account.");
+  await sql`INSERT INTO websites (id, name, domain, site_code, encrypted_auth_secret, status, payment_provider, razorpay_account_id, cashfree_account_id) VALUES (${id}, ${name}, ${assertDomain(input.domain)}, ${assertSiteCode(input.site_code)}, ${encryptSecret(secret)}, ${status(input.status || 'active')}, ${paymentProvider}, ${razorpayAssignment}, ${cashfreeAssignment})`;
   return { id, secret };
 }
 
@@ -114,9 +191,14 @@ export async function updateWebsite(websiteIdValue: unknown, input: Record<strin
   const rows = await sql`SELECT * FROM websites WHERE id = ${id}`;
   const website = rows[0] as WebsiteRow | undefined;
   if (!website) throw new Error("Website not found.");
-  const assignmentInput = Object.hasOwn(input, "razorpay_account_id") ? cleanText(input.razorpay_account_id, 80) || null : website.razorpay_account_id;
-  if (assignmentInput) assertId(assignmentInput);
-  await sql`UPDATE websites SET name = ${cleanText(input.name, 120) || website.name}, domain = ${input.domain ? assertDomain(input.domain) : website.domain}, site_code = ${input.site_code ? assertSiteCode(input.site_code) : website.site_code}, status = ${input.status ? status(input.status) : website.status}, razorpay_account_id = ${assignmentInput}, updated_at = now() WHERE id = ${id}`;
+  const paymentProvider = input.payment_provider ? provider(input.payment_provider) : website.payment_provider;
+  const razorpayAssignment = Object.hasOwn(input, "razorpay_account_id") ? cleanText(input.razorpay_account_id, 80) || null : website.razorpay_account_id;
+  const cashfreeAssignment = Object.hasOwn(input, "cashfree_account_id") ? cleanText(input.cashfree_account_id, 80) || null : website.cashfree_account_id;
+  if (razorpayAssignment) assertId(razorpayAssignment);
+  if (cashfreeAssignment) assertId(cashfreeAssignment);
+  if (paymentProvider === "razorpay" && !razorpayAssignment) throw new Error("Assign a Razorpay account before saving.");
+  if (paymentProvider === "cashfree" && !cashfreeAssignment) throw new Error("Assign a Cashfree account before saving.");
+  await sql`UPDATE websites SET name = ${cleanText(input.name, 120) || website.name}, domain = ${input.domain ? assertDomain(input.domain) : website.domain}, site_code = ${input.site_code ? assertSiteCode(input.site_code) : website.site_code}, status = ${input.status ? status(input.status) : website.status}, payment_provider = ${paymentProvider}, razorpay_account_id = ${razorpayAssignment}, cashfree_account_id = ${cashfreeAssignment}, updated_at = now() WHERE id = ${id}`;
   return id;
 }
 
@@ -136,26 +218,30 @@ export async function deleteWebsite(websiteIdValue: unknown) {
   await sql`DELETE FROM websites WHERE id = ${id}`;
 }
 
-export async function bulkAssignWebsiteIds(value: unknown, accountIdValue: unknown) {
+export async function bulkAssignWebsiteIds(value: unknown, accountIdValue: unknown, providerValue: unknown = "razorpay") {
   await ensureSchema();
   const ids = Array.isArray(value) ? value.map(assertId) : [];
   if (!ids.length || ids.length > 100) throw new Error("Select between 1 and 100 websites.");
+  const paymentProvider = provider(providerValue);
   const accountId = cleanText(accountIdValue, 80) || null;
   if (accountId) assertId(accountId);
-  await Promise.all(ids.map((id) => sql`UPDATE websites SET razorpay_account_id = ${accountId}, updated_at = now() WHERE id = ${id}`));
+  if (!accountId) throw new Error("Choose a payment account.");
+  if (paymentProvider === "razorpay") await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'razorpay', razorpay_account_id = ${accountId}, updated_at = now() WHERE id = ${id}`));
+  else await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'cashfree', cashfree_account_id = ${accountId}, updated_at = now() WHERE id = ${id}`));
   return ids;
 }
 
 export async function managerData() {
   await ensureSchema();
-  const [accounts, websites, transactions, logs, metrics] = await Promise.all([
+  const [accounts, cashfreeAccounts, websites, transactions, logs, metrics] = await Promise.all([
     sql`SELECT a.id, a.account_name, a.key_id, a.mode, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM razorpay_accounts a LEFT JOIN websites w ON w.razorpay_account_id = a.id GROUP BY a.id ORDER BY a.created_at DESC`,
-    sql`SELECT w.id, w.name, w.domain, w.site_code, w.status, w.razorpay_account_id, w.created_at, w.updated_at, a.account_name AS razorpay_account_name FROM websites w LEFT JOIN razorpay_accounts a ON a.id = w.razorpay_account_id ORDER BY w.created_at DESC`,
-    sql`SELECT t.id, t.internal_order_id, t.razorpay_order_id, t.razorpay_payment_link_id, t.razorpay_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name FROM payment_transactions t JOIN websites w ON w.id = t.website_id JOIN razorpay_accounts a ON a.id = t.razorpay_account_id ORDER BY t.created_at DESC LIMIT 100`,
+    sql`SELECT a.id, a.account_name, a.app_id, a.mode, a.api_version, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM cashfree_accounts a LEFT JOIN websites w ON w.cashfree_account_id = a.id GROUP BY a.id ORDER BY a.created_at DESC`,
+    sql`SELECT w.id, w.name, w.domain, w.site_code, w.status, w.payment_provider, w.razorpay_account_id, w.cashfree_account_id, w.created_at, w.updated_at, r.account_name AS razorpay_account_name, c.account_name AS cashfree_account_name FROM websites w LEFT JOIN razorpay_accounts r ON r.id = w.razorpay_account_id LEFT JOIN cashfree_accounts c ON c.id = w.cashfree_account_id ORDER BY w.created_at DESC`,
+    sql`SELECT * FROM (SELECT t.id, t.internal_order_id, t.razorpay_order_id AS provider_order_id, t.razorpay_payment_link_id AS provider_link_id, t.razorpay_payment_id AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'razorpay'::text AS provider FROM payment_transactions t JOIN websites w ON w.id = t.website_id JOIN razorpay_accounts a ON a.id = t.razorpay_account_id UNION ALL SELECT t.id, t.internal_order_id, t.cashfree_order_id AS provider_order_id, NULL::text AS provider_link_id, NULL::text AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'cashfree'::text AS provider FROM cashfree_transactions t JOIN websites w ON w.id = t.website_id JOIN cashfree_accounts a ON a.id = t.cashfree_account_id) tx ORDER BY created_at DESC LIMIT 100`,
     sql`SELECT l.id, l.action, l.entity_type, l.entity_id, l.message, l.created_at, u.email AS admin_email FROM audit_logs l LEFT JOIN admin_users u ON u.id = l.admin_user_id ORDER BY l.created_at DESC LIMIT 100`,
-    sql`SELECT (SELECT count(*)::int FROM websites) AS websites, (SELECT count(*)::int FROM websites WHERE status = 'active') AS active_websites, (SELECT count(*)::int FROM razorpay_accounts) AS accounts, (SELECT count(*)::int FROM razorpay_accounts WHERE status = 'active') AS active_accounts, (SELECT count(*)::int FROM payment_transactions WHERE created_at >= date_trunc('day', now())) AS today_payments, (SELECT count(*)::int FROM payment_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now())) AS successful_payments, (SELECT count(*)::int FROM payment_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now())) AS failed_payments`,
+    sql`SELECT (SELECT count(*)::int FROM websites) AS websites, (SELECT count(*)::int FROM websites WHERE status = 'active') AS active_websites, ((SELECT count(*)::int FROM razorpay_accounts) + (SELECT count(*)::int FROM cashfree_accounts)) AS accounts, ((SELECT count(*)::int FROM razorpay_accounts WHERE status = 'active') + (SELECT count(*)::int FROM cashfree_accounts WHERE status = 'active')) AS active_accounts, ((SELECT count(*)::int FROM payment_transactions WHERE created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE created_at >= date_trunc('day', now()))) AS today_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now()))) AS successful_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now()))) AS failed_payments`,
   ]);
-  return { accounts, websites, transactions, logs, metrics: metrics[0] || {} };
+  return { accounts, cashfreeAccounts, websites, transactions, logs, metrics: metrics[0] || {} };
 }
 
 export async function authenticateSite(request: NextRequest, rawBody: string, expectedPath: string) {
@@ -175,5 +261,5 @@ export async function authenticateSite(request: NextRequest, rawBody: string, ex
 }
 
 export function publicWebsite(website: WebsiteRow) {
-  return { id: website.id, name: website.name, domain: website.domain, siteCode: website.site_code, status: website.status, razorpayAccountId: website.razorpay_account_id };
+  return { id: website.id, name: website.name, domain: website.domain, siteCode: website.site_code, status: website.status, provider: website.payment_provider, razorpayAccountId: website.razorpay_account_id, cashfreeAccountId: website.cashfree_account_id };
 }

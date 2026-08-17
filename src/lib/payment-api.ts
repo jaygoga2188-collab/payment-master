@@ -2,7 +2,8 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { ensureSchema, sql } from "@/lib/db";
-import { authenticateSite, credentialForAccount } from "@/lib/manager";
+import { authenticateSite, cashfreeCredentialForAccount, credentialForAccount } from "@/lib/manager";
+import { cashfreeRequest, verifyCashfreeWebhook } from "@/lib/cashfree";
 import { razorpayRequest, verifyRazorpaySignature } from "@/lib/razorpay";
 import type { NextRequest } from "next/server";
 
@@ -11,6 +12,7 @@ type Transaction = {
   resource_type: "order" | "payment_link"; razorpay_order_id: string | null; razorpay_payment_link_id: string | null; razorpay_payment_id: string | null;
   checkout_url: string | null; amount_paise: number; currency: string; status: string;
 };
+type CashfreeTransaction = { id: string; website_id: string; cashfree_account_id: string; cashfree_credential_version_id: string; internal_order_id: string; cashfree_order_id: string; payment_session_id: string | null; checkout_url: string | null; amount_paise: number; currency: string; status: string };
 
 function text(value: unknown, max = 255) { return String(value || "").trim().slice(0, max); }
 function amount(value: unknown) { const number = Number(value); if (!Number.isSafeInteger(number) || number < 100) throw new Error("INVALID_PAYMENT_REQUEST"); return number; }
@@ -32,10 +34,42 @@ function publicTransaction(row: Transaction, keyId: string) {
   };
 }
 
+function publicCashfreeTransaction(row: CashfreeTransaction) {
+  return { success: true, provider: "cashfree", internal_order_id: row.internal_order_id, order_id: row.cashfree_order_id, payment_session_id: row.payment_session_id || undefined, payment_link: row.checkout_url || undefined, amount: Number(row.amount_paise), currency: row.currency, status: row.status };
+}
+
+async function createCashfreeCentralPayment(website: { id: string; site_code: string; domain: string; cashfree_account_id: string | null }, body: Record<string, unknown>) {
+  if (!website.cashfree_account_id) throw new Error("PAYMENT_UNAVAILABLE");
+  const accountRows = await sql`SELECT id, status FROM cashfree_accounts WHERE id = ${website.cashfree_account_id}`;
+  if (!accountRows[0] || accountRows[0].status !== "active") throw new Error("PAYMENT_UNAVAILABLE");
+  const internalOrderId = orderId(body.internal_order_id); const amountPaise = amount(body.amount); const paymentCurrency = currency(body.currency);
+  const existingRows = await sql`SELECT * FROM cashfree_transactions WHERE website_id = ${website.id} AND internal_order_id = ${internalOrderId}`;
+  if (existingRows[0]) return publicCashfreeTransaction(existingRows[0] as CashfreeTransaction);
+  const credentials = await cashfreeCredentialForAccount(website.cashfree_account_id);
+  const txId = randomUUID(); const cashfreeOrderId = `pm_${txId.replace(/-/g, "")}`;
+  const customerInput = (body.customer && typeof body.customer === "object" ? body.customer : {}) as Record<string, unknown>;
+  const phone = text(customerInput.contact || customerInput.phone, 15).replace(/\D/g, "").slice(-10);
+  if (!/^\d{10}$/.test(phone)) throw new Error("INVALID_PAYMENT_REQUEST");
+  const customer: Record<string, string> = { customer_id: `pm_${website.id.slice(0, 8)}_${phone}`, customer_phone: phone };
+  const customerName = text(customerInput.name, 80); const customerEmail = text(customerInput.email, 160);
+  if (customerName) customer.customer_name = customerName; if (customerEmail.includes("@")) customer.customer_email = customerEmail;
+  const returnUrl = allowedCallback(body.callback_url, website.domain);
+  const payload = await cashfreeRequest<{ order_id: string; order_status: string; payment_session_id?: string; payment_link?: string }>(
+    { appId: credentials.appId, secretKey: credentials.secretKey, mode: credentials.mode, apiVersion: credentials.apiVersion }, "/orders",
+    { method: "POST", headers: { "x-idempotency-key": txId }, body: JSON.stringify({ order_id: cashfreeOrderId, order_amount: amountPaise / 100, order_currency: paymentCurrency, customer_details: customer, order_meta: { return_url: returnUrl }, order_note: text(body.description, 255) || "Order payment", order_tags: { website: website.site_code, internal_order_id: internalOrderId } }) },
+  );
+  if (payload.order_id !== cashfreeOrderId) throw new Error("PAYMENT_PROVIDER_ERROR");
+  const hosted = payload.payment_link ? new URL(payload.payment_link) : null;
+  const link = hosted && hosted.protocol === "https:" && (hosted.hostname === "cashfree.com" || hosted.hostname.endsWith(".cashfree.com")) ? hosted.toString() : null;
+  await sql`INSERT INTO cashfree_transactions (id, website_id, cashfree_account_id, cashfree_credential_version_id, internal_order_id, cashfree_order_id, payment_session_id, checkout_url, amount_paise, currency, status) VALUES (${txId}, ${website.id}, ${website.cashfree_account_id}, ${credentials.version.id}, ${internalOrderId}, ${cashfreeOrderId}, ${payload.payment_session_id || null}, ${link}, ${amountPaise}, ${paymentCurrency}, 'pending')`;
+  return publicCashfreeTransaction({ id: txId, website_id: website.id, cashfree_account_id: website.cashfree_account_id, cashfree_credential_version_id: credentials.version.id, internal_order_id: internalOrderId, cashfree_order_id: cashfreeOrderId, payment_session_id: payload.payment_session_id || null, checkout_url: link, amount_paise: amountPaise, currency: paymentCurrency, status: "pending" });
+}
+
 export async function createCentralPayment(request: NextRequest, rawBody: string) {
   const website = await authenticateSite(request, rawBody, "/api/payment/create-order");
   const body = JSON.parse(rawBody) as Record<string, unknown>;
   if (text(body.site_code, 64).toUpperCase() !== website.site_code) throw new Error("SITE_AUTH_FAILED");
+  if (website.payment_provider === "cashfree") return createCashfreeCentralPayment(website, body);
   if (!website.razorpay_account_id) throw new Error("PAYMENT_UNAVAILABLE");
   const accounts = await sql`SELECT id, status FROM razorpay_accounts WHERE id = ${website.razorpay_account_id}`;
   if (!accounts[0] || accounts[0].status !== "active") throw new Error("PAYMENT_UNAVAILABLE");
@@ -80,6 +114,20 @@ export async function verifyCentralPayment(request: NextRequest, rawBody: string
   const body = JSON.parse(rawBody) as Record<string, unknown>;
   if (text(body.site_code, 64).toUpperCase() !== website.site_code) throw new Error("SITE_AUTH_FAILED");
   const internalOrderId = orderId(body.internal_order_id);
+  const cashfreeRows = await sql`SELECT * FROM cashfree_transactions WHERE website_id = ${website.id} AND internal_order_id = ${internalOrderId}`;
+  if (cashfreeRows[0]) {
+    const transaction = cashfreeRows[0] as CashfreeTransaction;
+    const credentials = await cashfreeCredentialForAccount(transaction.cashfree_account_id, transaction.cashfree_credential_version_id);
+    const remote = await cashfreeRequest<{ order_id: string; order_amount: number; order_currency: string; order_status: string }>(
+      { appId: credentials.appId, secretKey: credentials.secretKey, mode: credentials.mode, apiVersion: credentials.apiVersion }, `/orders/${encodeURIComponent(transaction.cashfree_order_id)}`,
+    );
+    if (remote.order_id !== transaction.cashfree_order_id || Math.round(Number(remote.order_amount) * 100) !== Number(transaction.amount_paise) || remote.order_currency !== transaction.currency) throw new Error("PAYMENT_VERIFICATION_FAILED");
+    const remoteStatus = String(remote.order_status || "").toUpperCase();
+    const nextStatus = remoteStatus === "PAID" ? "paid" : remoteStatus === "EXPIRED" || remoteStatus === "TERMINATED" ? "expired" : remoteStatus === "CANCELLED" ? "cancelled" : "pending";
+    await sql`UPDATE cashfree_transactions SET status = ${nextStatus}, updated_at = now() WHERE id = ${transaction.id}`;
+    if (nextStatus !== "paid") throw new Error("PAYMENT_NOT_CAPTURED");
+    return { success: true, provider: "cashfree", status: "paid", internal_order_id: transaction.internal_order_id, cashfree_order_id: transaction.cashfree_order_id, amount: transaction.amount_paise, currency: transaction.currency };
+  }
   const rows = await sql`SELECT * FROM payment_transactions WHERE website_id = ${website.id} AND internal_order_id = ${internalOrderId}`;
   const transaction = rows[0] as Transaction | undefined;
   if (!transaction) throw new Error("PAYMENT_NOT_FOUND");
@@ -120,6 +168,25 @@ export async function applyWebhook(rawBody: string, signature: string) {
   const matches = await sql`SELECT * FROM payment_transactions WHERE razorpay_account_id = ${accountId} AND (razorpay_order_id = ${payment?.order_id || ""} OR razorpay_payment_link_id = ${link?.id || ""})`;
   const status = payload.event === "payment.captured" || payload.event === "payment_link.paid" ? "paid" : payload.event === "payment.failed" ? "failed" : null;
   if (status) await Promise.all((matches as Transaction[]).map((transaction) => sql`UPDATE payment_transactions SET razorpay_payment_id = ${payment?.id || transaction.razorpay_payment_id}, status = ${status}, updated_at = now() WHERE id = ${transaction.id}`));
+  return { accepted: true };
+}
+
+export async function applyCashfreeWebhook(rawBody: string, timestamp: string, signature: string) {
+  await ensureSchema();
+  if (!/^\d{10,16}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 10 * 60_000) throw new Error("WEBHOOK_AUTH_FAILED");
+  const versions = await sql`SELECT id, cashfree_account_id FROM cashfree_credential_versions`;
+  let accountId: string | null = null;
+  for (const item of versions as { id: string; cashfree_account_id: string }[]) {
+    const credentials = await cashfreeCredentialForAccount(item.cashfree_account_id, item.id);
+    if (verifyCashfreeWebhook(credentials.secretKey, timestamp, rawBody, signature)) { accountId = item.cashfree_account_id; break; }
+  }
+  if (!accountId) throw new Error("WEBHOOK_AUTH_FAILED");
+  const payload = JSON.parse(rawBody) as { type?: string; data?: { order?: { order_id?: string }; payment?: { payment_status?: string } }; order_id?: string; order_status?: string };
+  const orderIdValue = text(payload.data?.order?.order_id || payload.order_id, 100);
+  if (!orderIdValue) return { accepted: true };
+  const signal = `${payload.type || ""}.${payload.data?.payment?.payment_status || payload.order_status || ""}`.toUpperCase();
+  const nextStatus = signal.includes("SUCCESS") || signal.includes("PAID") ? "paid" : signal.includes("FAILED") ? "failed" : null;
+  if (nextStatus) await sql`UPDATE cashfree_transactions SET status = ${nextStatus}, updated_at = now() WHERE cashfree_account_id = ${accountId} AND cashfree_order_id = ${orderIdValue}`;
   return { accepted: true };
 }
 
