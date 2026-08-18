@@ -86,6 +86,24 @@ async function createSchema() {
   )`;
   await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS payment_provider TEXT NOT NULL DEFAULT 'razorpay'`;
   await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS cashfree_account_id UUID REFERENCES cashfree_accounts(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE razorpay_accounts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE cashfree_accounts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
+  await sql`CREATE TABLE IF NOT EXISTS facebook_pixels (
+    id UUID PRIMARY KEY,
+    pixel_name TEXT NOT NULL UNIQUE,
+    pixel_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('active','inactive')) DEFAULT 'active',
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`;
+  await sql`CREATE TABLE IF NOT EXISTS website_facebook_pixels (
+    website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE,
+    facebook_pixel_id UUID NOT NULL REFERENCES facebook_pixels(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (website_id, facebook_pixel_id)
+  )`;
+  await sql`CREATE INDEX IF NOT EXISTS website_facebook_pixels_pixel_idx ON website_facebook_pixels(facebook_pixel_id)`;
   await sql`CREATE TABLE IF NOT EXISTS cashfree_transactions (
     id UUID PRIMARY KEY,
     website_id UUID NOT NULL REFERENCES websites(id) ON DELETE RESTRICT,
