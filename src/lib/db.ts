@@ -86,6 +86,9 @@ async function createSchema() {
   )`;
   await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS payment_provider TEXT NOT NULL DEFAULT 'razorpay'`;
   await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS cashfree_account_id UUID REFERENCES cashfree_accounts(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS archived_domain TEXT`;
+  await sql`ALTER TABLE websites ADD COLUMN IF NOT EXISTS archived_site_code TEXT`;
   await sql`ALTER TABLE razorpay_accounts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
   await sql`ALTER TABLE cashfree_accounts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
   await sql`CREATE TABLE IF NOT EXISTS facebook_pixels (

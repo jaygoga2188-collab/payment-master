@@ -13,6 +13,6 @@ export async function PATCH(request: NextRequest) {
   catch (error) { return adminError(error); }
 }
 export async function DELETE(request: NextRequest) {
-  try { assertSameOrigin(request); const user = await requireAdmin(request); const id = new URL(request.url).searchParams.get("id"); await deleteWebsite(id); await writeAudit(user, "website.deleted", "website", id, "Deleted an unused website."); return NextResponse.json({ success: true }); }
+  try { assertSameOrigin(request); const user = await requireAdmin(request); const id = new URL(request.url).searchParams.get("id"); await deleteWebsite(id); await writeAudit(user, "website.archived", "website", id, "Removed a website from active operations while preserving its history."); return NextResponse.json({ success: true }); }
   catch (error) { return adminError(error); }
 }

@@ -94,7 +94,7 @@ export async function updateAccount(accountIdValue: unknown, input: Record<strin
 export async function deleteAccount(accountIdValue: unknown) {
   await ensureSchema();
   const accountId = assertId(accountIdValue);
-  const assigned = await sql`SELECT count(*)::int AS count FROM websites WHERE razorpay_account_id = ${accountId}`;
+  const assigned = await sql`SELECT count(*)::int AS count FROM websites WHERE razorpay_account_id = ${accountId} AND archived_at IS NULL`;
   if (Number(assigned[0]?.count || 0)) throw new Error("Move assigned websites to another gateway before archiving this account.");
   // Archive instead of deleting: transaction/account links and historic credentials
   // remain usable for audit and delayed webhook verification.
@@ -158,7 +158,7 @@ export async function deleteCashfreeAccount(accountIdValue: unknown) {
   await ensureSchema();
   const accountId = assertId(accountIdValue);
   const [assigned] = await Promise.all([
-    sql`SELECT count(*)::int AS count FROM websites WHERE cashfree_account_id = ${accountId}`,
+    sql`SELECT count(*)::int AS count FROM websites WHERE cashfree_account_id = ${accountId} AND archived_at IS NULL`,
   ]);
   if (Number(assigned[0]?.count || 0)) throw new Error("Move assigned websites to another gateway before archiving this account.");
   // Archive rather than delete so lifetime collections and verification history stay intact.
@@ -234,7 +234,7 @@ export async function createWebsite(input: Record<string, unknown>) {
 export async function updateWebsite(websiteIdValue: unknown, input: Record<string, unknown>) {
   await ensureSchema();
   const id = assertId(websiteIdValue);
-  const rows = await sql`SELECT * FROM websites WHERE id = ${id}`;
+  const rows = await sql`SELECT * FROM websites WHERE id = ${id} AND archived_at IS NULL`;
   const website = rows[0] as WebsiteRow | undefined;
   if (!website) throw new Error("Website not found.");
   const paymentProvider = input.payment_provider ? provider(input.payment_provider) : website.payment_provider;
@@ -260,21 +260,25 @@ export async function rotateWebsiteSecret(websiteIdValue: unknown) {
 export async function deleteWebsite(websiteIdValue: unknown) {
   await ensureSchema();
   const id = assertId(websiteIdValue);
-  const transactions = await sql`SELECT count(*)::int AS count FROM payment_transactions WHERE website_id = ${id}`;
-  if (Number(transactions[0]?.count || 0)) throw new Error("This website has transaction history. Set it inactive instead.");
-  await sql`DELETE FROM websites WHERE id = ${id}`;
+  const rows = await sql`SELECT domain, site_code FROM websites WHERE id = ${id} AND archived_at IS NULL`;
+  const website = rows[0] as { domain: string; site_code: string } | undefined;
+  if (!website) throw new Error("Website not found.");
+  // Remove it from operations while preserving payment/audit foreign keys. The
+  // original identifiers are retained, and live unique identifiers are freed
+  // so the same site can be added again later if required.
+  await sql`UPDATE websites SET status = 'inactive', archived_at = now(), archived_domain = ${website.domain}, archived_site_code = ${website.site_code}, domain = ${`archived-${id}.invalid`}, site_code = ${`ARCHIVED_${id.replaceAll("-", "")}`}, razorpay_account_id = NULL, cashfree_account_id = NULL, updated_at = now() WHERE id = ${id}`;
 }
 
 export async function bulkAssignWebsiteIds(value: unknown, accountIdValue: unknown, providerValue: unknown = "razorpay") {
   await ensureSchema();
   const ids = Array.isArray(value) ? value.map(assertId) : [];
-  if (!ids.length || ids.length > 100) throw new Error("Select between 1 and 100 websites.");
+  if (!ids.length || ids.length > 1000) throw new Error("Select between 1 and 1000 websites.");
   const paymentProvider = provider(providerValue);
   const accountId = cleanText(accountIdValue, 80) || null;
   if (accountId) assertId(accountId);
   if (!accountId) throw new Error("Choose a payment account.");
-  if (paymentProvider === "razorpay") await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'razorpay', razorpay_account_id = ${accountId}, updated_at = now() WHERE id = ${id}`));
-  else await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'cashfree', cashfree_account_id = ${accountId}, updated_at = now() WHERE id = ${id}`));
+  if (paymentProvider === "razorpay") await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'razorpay', razorpay_account_id = ${accountId}, updated_at = now() WHERE id = ${id} AND archived_at IS NULL`));
+  else await Promise.all(ids.map((id) => sql`UPDATE websites SET payment_provider = 'cashfree', cashfree_account_id = ${accountId}, updated_at = now() WHERE id = ${id} AND archived_at IS NULL`));
   return ids;
 }
 
@@ -282,13 +286,13 @@ export async function managerData(selectedDate?: string | null) {
   await ensureSchema();
   const selectedReportDate = reportDate(selectedDate);
   const [accounts, cashfreeAccounts, websites, pixels, transactions, logs, metrics, collectionSummary, collectionBySite, collectionByAccount, gatewayLedger] = await Promise.all([
-    sql`SELECT a.id, a.account_name, a.key_id, a.mode, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM razorpay_accounts a LEFT JOIN websites w ON w.razorpay_account_id = a.id WHERE a.archived_at IS NULL GROUP BY a.id ORDER BY a.created_at DESC`,
-    sql`SELECT a.id, a.account_name, a.app_id, a.mode, a.api_version, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM cashfree_accounts a LEFT JOIN websites w ON w.cashfree_account_id = a.id WHERE a.archived_at IS NULL GROUP BY a.id ORDER BY a.created_at DESC`,
-    sql`SELECT w.id, w.name, w.domain, w.site_code, w.status, w.payment_provider, w.razorpay_account_id, w.cashfree_account_id, w.created_at, w.updated_at, r.account_name AS razorpay_account_name, c.account_name AS cashfree_account_name, coalesce(array_agg(wfp.facebook_pixel_id) FILTER (WHERE wfp.facebook_pixel_id IS NOT NULL), '{}'::uuid[]) AS facebook_pixel_ids FROM websites w LEFT JOIN razorpay_accounts r ON r.id = w.razorpay_account_id LEFT JOIN cashfree_accounts c ON c.id = w.cashfree_account_id LEFT JOIN website_facebook_pixels wfp ON wfp.website_id = w.id GROUP BY w.id, r.account_name, c.account_name ORDER BY w.created_at DESC`,
+    sql`SELECT a.id, a.account_name, a.key_id, a.mode, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM razorpay_accounts a LEFT JOIN websites w ON w.razorpay_account_id = a.id AND w.archived_at IS NULL WHERE a.archived_at IS NULL GROUP BY a.id ORDER BY a.created_at DESC`,
+    sql`SELECT a.id, a.account_name, a.app_id, a.mode, a.api_version, a.status, a.created_at, a.updated_at, count(w.id)::int AS website_count FROM cashfree_accounts a LEFT JOIN websites w ON w.cashfree_account_id = a.id AND w.archived_at IS NULL WHERE a.archived_at IS NULL GROUP BY a.id ORDER BY a.created_at DESC`,
+    sql`SELECT w.id, w.name, w.domain, w.site_code, w.status, w.payment_provider, w.razorpay_account_id, w.cashfree_account_id, w.created_at, w.updated_at, r.account_name AS razorpay_account_name, c.account_name AS cashfree_account_name, coalesce(array_agg(wfp.facebook_pixel_id) FILTER (WHERE wfp.facebook_pixel_id IS NOT NULL), '{}'::uuid[]) AS facebook_pixel_ids FROM websites w LEFT JOIN razorpay_accounts r ON r.id = w.razorpay_account_id LEFT JOIN cashfree_accounts c ON c.id = w.cashfree_account_id LEFT JOIN website_facebook_pixels wfp ON wfp.website_id = w.id WHERE w.archived_at IS NULL GROUP BY w.id, r.account_name, c.account_name ORDER BY w.created_at DESC`,
     sql`SELECT p.id, p.pixel_name, p.pixel_id, p.status, p.archived_at, p.created_at, p.updated_at, count(wfp.website_id)::int AS website_count, coalesce(string_agg(w.name, ', ' ORDER BY w.name), '') AS assigned_websites FROM facebook_pixels p LEFT JOIN website_facebook_pixels wfp ON wfp.facebook_pixel_id = p.id LEFT JOIN websites w ON w.id = wfp.website_id GROUP BY p.id ORDER BY p.archived_at NULLS FIRST, p.created_at DESC`,
     sql`SELECT * FROM (SELECT t.id, t.internal_order_id, t.razorpay_order_id AS provider_order_id, t.razorpay_payment_link_id AS provider_link_id, t.razorpay_payment_id AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'razorpay'::text AS provider FROM payment_transactions t JOIN websites w ON w.id = t.website_id JOIN razorpay_accounts a ON a.id = t.razorpay_account_id WHERE t.status = 'paid' UNION ALL SELECT t.id, t.internal_order_id, t.cashfree_order_id AS provider_order_id, NULL::text AS provider_link_id, NULL::text AS provider_payment_id, t.amount_paise, t.currency, t.status, t.created_at, t.updated_at, w.name AS website_name, a.account_name, 'cashfree'::text AS provider FROM cashfree_transactions t JOIN websites w ON w.id = t.website_id JOIN cashfree_accounts a ON a.id = t.cashfree_account_id WHERE t.status = 'paid') tx ORDER BY updated_at DESC LIMIT 100`,
     sql`SELECT l.id, l.action, l.entity_type, l.entity_id, l.message, l.created_at, u.email AS admin_email FROM audit_logs l LEFT JOIN admin_users u ON u.id = l.admin_user_id ORDER BY l.created_at DESC LIMIT 100`,
-    sql`SELECT (SELECT count(*)::int FROM websites) AS websites, (SELECT count(*)::int FROM websites WHERE status = 'active') AS active_websites, ((SELECT count(*)::int FROM razorpay_accounts WHERE archived_at IS NULL) + (SELECT count(*)::int FROM cashfree_accounts WHERE archived_at IS NULL)) AS accounts, ((SELECT count(*)::int FROM razorpay_accounts WHERE status = 'active' AND archived_at IS NULL) + (SELECT count(*)::int FROM cashfree_accounts WHERE status = 'active' AND archived_at IS NULL)) AS active_accounts, ((SELECT count(*)::int FROM payment_transactions WHERE created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE created_at >= date_trunc('day', now()))) AS today_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now()))) AS successful_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now()))) AS failed_payments`,
+    sql`SELECT (SELECT count(*)::int FROM websites WHERE archived_at IS NULL) AS websites, (SELECT count(*)::int FROM websites WHERE status = 'active' AND archived_at IS NULL) AS active_websites, ((SELECT count(*)::int FROM razorpay_accounts WHERE archived_at IS NULL) + (SELECT count(*)::int FROM cashfree_accounts WHERE archived_at IS NULL)) AS accounts, ((SELECT count(*)::int FROM razorpay_accounts WHERE status = 'active' AND archived_at IS NULL) + (SELECT count(*)::int FROM cashfree_accounts WHERE status = 'active' AND archived_at IS NULL)) AS active_accounts, ((SELECT count(*)::int FROM payment_transactions WHERE created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE created_at >= date_trunc('day', now()))) AS today_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'paid' AND created_at >= date_trunc('day', now()))) AS successful_payments, ((SELECT count(*)::int FROM payment_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now())) + (SELECT count(*)::int FROM cashfree_transactions WHERE status = 'failed' AND created_at >= date_trunc('day', now()))) AS failed_payments`,
     sql`SELECT provider, count(*)::int AS payment_count, coalesce(sum(amount_paise), 0)::bigint AS amount_paise FROM (SELECT 'razorpay'::text AS provider, amount_paise, updated_at FROM payment_transactions WHERE status = 'paid' UNION ALL SELECT 'cashfree'::text AS provider, amount_paise, updated_at FROM cashfree_transactions WHERE status = 'paid') paid WHERE (paid.updated_at AT TIME ZONE 'Asia/Kolkata')::date = ${selectedReportDate}::date GROUP BY provider`,
     sql`SELECT website_name, provider, count(*)::int AS payment_count, coalesce(sum(amount_paise), 0)::bigint AS amount_paise FROM (SELECT w.name AS website_name, 'razorpay'::text AS provider, t.amount_paise, t.updated_at FROM payment_transactions t JOIN websites w ON w.id = t.website_id WHERE t.status = 'paid' UNION ALL SELECT w.name AS website_name, 'cashfree'::text AS provider, t.amount_paise, t.updated_at FROM cashfree_transactions t JOIN websites w ON w.id = t.website_id WHERE t.status = 'paid') paid WHERE (paid.updated_at AT TIME ZONE 'Asia/Kolkata')::date = ${selectedReportDate}::date GROUP BY website_name, provider ORDER BY amount_paise DESC, website_name ASC`,
     sql`SELECT account_name, provider, count(*)::int AS payment_count, coalesce(sum(amount_paise), 0)::bigint AS amount_paise FROM (SELECT a.account_name, 'razorpay'::text AS provider, t.amount_paise, t.updated_at FROM payment_transactions t JOIN razorpay_accounts a ON a.id = t.razorpay_account_id WHERE t.status = 'paid' UNION ALL SELECT a.account_name, 'cashfree'::text AS provider, t.amount_paise, t.updated_at FROM cashfree_transactions t JOIN cashfree_accounts a ON a.id = t.cashfree_account_id WHERE t.status = 'paid') paid WHERE (paid.updated_at AT TIME ZONE 'Asia/Kolkata')::date = ${selectedReportDate}::date GROUP BY account_name, provider ORDER BY amount_paise DESC, account_name ASC`,
@@ -308,7 +312,7 @@ export async function authenticateSite(request: NextRequest, rawBody: string, ex
   const timestamp = request.headers.get("x-payment-timestamp")?.trim() || "";
   const signature = request.headers.get("x-payment-signature")?.trim() || "";
   if (!siteCode || !timestamp || !signature || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000) throw new Error("SITE_AUTH_FAILED");
-  const rows = await sql`SELECT * FROM websites WHERE site_code = ${siteCode}`;
+  const rows = await sql`SELECT * FROM websites WHERE site_code = ${siteCode} AND archived_at IS NULL`;
   const website = rows[0] as WebsiteRow | undefined;
   if (!website || website.status !== "active") throw new Error("SITE_AUTH_FAILED");
   const bodyHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
