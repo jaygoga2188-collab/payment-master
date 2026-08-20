@@ -282,6 +282,19 @@ export async function bulkAssignWebsiteIds(value: unknown, accountIdValue: unkno
   return ids;
 }
 
+export async function bulkAttachFacebookPixel(websiteIdsValue: unknown, pixelIdValue: unknown) {
+  await ensureSchema();
+  const ids = Array.isArray(websiteIdsValue) ? websiteIdsValue.map(assertId) : [];
+  if (!ids.length || ids.length > 1000) throw new Error("Select between 1 and 1000 websites.");
+  const pixelId = assertId(pixelIdValue);
+  const pixel = await sql`SELECT id FROM facebook_pixels WHERE id = ${pixelId} AND status = 'active' AND archived_at IS NULL`;
+  if (!pixel[0]) throw new Error("Choose an active Facebook Pixel.");
+  const sites = await Promise.all(ids.map((id) => sql`SELECT id FROM websites WHERE id = ${id} AND archived_at IS NULL`));
+  if (sites.some((rows) => !rows[0])) throw new Error("One or more websites are unavailable.");
+  await Promise.all(ids.map((websiteId) => sql`INSERT INTO website_facebook_pixels (website_id, facebook_pixel_id) VALUES (${websiteId}, ${pixelId}) ON CONFLICT (website_id, facebook_pixel_id) DO NOTHING`));
+  return ids;
+}
+
 export async function managerData(selectedDate?: string | null) {
   await ensureSchema();
   const selectedReportDate = reportDate(selectedDate);
