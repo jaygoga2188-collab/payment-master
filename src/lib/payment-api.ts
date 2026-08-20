@@ -162,7 +162,21 @@ export async function verifyCentralPayment(request: NextRequest, rawBody: string
     // payments list. The signed callback binds this payment ID to the link;
     // fetch the payment itself and require it to be captured for the exact
     // transaction amount before confirming the order.
-    if (link.status !== "paid" || link.amount !== transaction.amount_paise || link.amount_paid !== transaction.amount_paise || link.currency !== transaction.currency || payment.id !== paymentId || payment.amount !== transaction.amount_paise || payment.currency !== transaction.currency || payment.status !== "captured" || !payment.captured) throw new Error("PAYMENT_NOT_CAPTURED");
+    if (link.status !== "paid" || link.amount !== transaction.amount_paise || link.amount_paid !== transaction.amount_paise || link.currency !== transaction.currency || payment.id !== paymentId || payment.amount !== transaction.amount_paise || payment.currency !== transaction.currency || payment.status !== "captured" || !payment.captured) {
+      console.warn("Razorpay payment link has not reached captured state", {
+        linkStatus: link.status,
+        linkAmount: link.amount,
+        linkAmountPaid: link.amount_paid,
+        linkCurrency: link.currency,
+        paymentStatus: payment.status,
+        paymentCaptured: payment.captured,
+        paymentAmount: payment.amount,
+        paymentCurrency: payment.currency,
+        expectedAmount: transaction.amount_paise,
+        expectedCurrency: transaction.currency,
+      });
+      throw new Error("PAYMENT_NOT_CAPTURED");
+    }
   } else {
     const orderIdValue = text(body.razorpay_order_id, 100);
     if (orderIdValue !== transaction.razorpay_order_id || !verifyRazorpaySignature(credentials.keySecret, `${orderIdValue}|${paymentId}`, signature)) throw new Error("PAYMENT_VERIFICATION_FAILED");
