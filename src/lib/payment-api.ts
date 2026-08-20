@@ -212,8 +212,8 @@ export async function applyCashfreeWebhook(rawBody: string, timestamp: string, s
 
 export function paymentError(error: unknown) {
   const message = error instanceof Error ? error.message : "PAYMENT_UNAVAILABLE";
-  if (message === "SITE_AUTH_FAILED") return { status: 401, body: { success: false, error: "Unauthorized payment request." } };
-  if (["INVALID_PAYMENT_REQUEST", "INVALID_CALLBACK_URL"].includes(message)) return { status: 400, body: { success: false, error: "Invalid payment request." } };
-  if (["PAYMENT_NOT_FOUND", "PAYMENT_VERIFICATION_FAILED", "PAYMENT_NOT_CAPTURED"].includes(message)) return { status: 400, body: { success: false, error: "Payment could not be verified." } };
-  return { status: 503, body: { success: false, error: "Payment service temporarily unavailable." } };
+  if (message === "SITE_AUTH_FAILED") return { status: 401, body: { success: false, code: message, error: "Unauthorized payment request." } };
+  if (["INVALID_PAYMENT_REQUEST", "INVALID_CALLBACK_URL"].includes(message)) return { status: 400, body: { success: false, code: message, error: "Invalid payment request." } };
+  if (["PAYMENT_NOT_FOUND", "PAYMENT_VERIFICATION_FAILED", "PAYMENT_NOT_CAPTURED"].includes(message)) return { status: 400, body: { success: false, code: message, error: "Payment could not be verified." } };
+  return { status: 503, body: { success: false, code: "PAYMENT_UNAVAILABLE", error: "Payment service temporarily unavailable." } };
 }
