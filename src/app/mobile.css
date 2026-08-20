@@ -1,0 +1,179 @@
+@media (max-width: 700px) {
+  html,
+  body {
+    width: 100%;
+    min-width: 0;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .admin-shell {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    width: 100%;
+    height: auto;
+    padding: 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .brand {
+    padding: 0 4px 11px;
+  }
+
+  .sidebar nav {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 0 0 3px;
+    scrollbar-width: none;
+  }
+
+  .sidebar nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sidebar nav button {
+    flex: 0 0 auto;
+    padding: 9px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .main-panel {
+    width: 100%;
+    max-width: none;
+    padding: 16px 12px 28px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+
+  .topbar h1 {
+    font-size: 22px;
+  }
+
+  .topbar .ghost {
+    flex: 0 0 auto;
+    padding: 9px 11px;
+  }
+
+  .panel {
+    margin-bottom: 14px;
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .two-col,
+  .form-grid,
+  .assignment-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .metric {
+    min-height: 82px;
+    padding: 12px;
+  }
+
+  .metric strong {
+    margin-top: 8px;
+    font-size: 21px;
+  }
+
+  .collection-head {
+    display: grid;
+    align-items: stretch;
+  }
+
+  .date-picker {
+    min-width: 0;
+  }
+
+  .collection-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 9px;
+  }
+
+  .collection-card {
+    padding: 14px;
+  }
+
+  .collection-card strong {
+    margin: 8px 0 5px;
+    font-size: 22px;
+  }
+
+  .collection-sites article {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 9px;
+  }
+
+  .collection-sites article > div {
+    min-width: 0;
+    flex: 1 1 190px;
+  }
+
+  .collection-sites strong {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .transaction-card {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .transaction-card code {
+    grid-column: auto;
+    overflow-wrap: anywhere;
+  }
+
+  .cards,
+  .site-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-card,
+  .account-card {
+    min-width: 0;
+  }
+
+  .code-block {
+    overflow-wrap: anywhere;
+  }
+
+  .actions > button,
+  .bulk-bar > button {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 360px) {
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topbar {
+    display: grid;
+  }
+
+  .topbar .ghost {
+    width: 100%;
+  }
+}
