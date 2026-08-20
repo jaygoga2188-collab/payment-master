@@ -154,9 +154,15 @@ export async function verifyCentralPayment(request: NextRequest, rawBody: string
     const reference = text(body.razorpay_payment_link_reference_id, 128);
     const linkStatus = text(body.razorpay_payment_link_status, 30).toLowerCase();
     if (linkId !== transaction.razorpay_payment_link_id || reference !== transaction.internal_order_id || linkStatus !== "paid" || !verifyRazorpaySignature(credentials.keySecret, `${linkId}|${reference}|${linkStatus}|${paymentId}`, signature)) throw new Error("PAYMENT_VERIFICATION_FAILED");
-    const link = await razorpayRequest<{ id: string; status: string; amount: number; amount_paid: number; currency: string; payments?: { payment_id?: string; status?: string; amount?: number }[] }>(credentials, `/payment_links/${encodeURIComponent(linkId)}`);
-    const captured = (link.payments || []).some((item) => item.payment_id === paymentId && item.status === "captured" && item.amount === transaction.amount_paise);
-    if (link.status !== "paid" || link.amount !== transaction.amount_paise || link.amount_paid !== transaction.amount_paise || link.currency !== transaction.currency || !captured) throw new Error("PAYMENT_NOT_CAPTURED");
+    const [link, payment] = await Promise.all([
+      razorpayRequest<{ id: string; status: string; amount: number; amount_paid: number; currency: string }>(credentials, `/payment_links/${encodeURIComponent(linkId)}`),
+      razorpayRequest<{ id: string; amount: number; currency: string; status: string; captured: boolean }>(credentials, `/payments/${encodeURIComponent(paymentId)}`),
+    ]);
+    // A Payment Link's GET response does not reliably include its embedded
+    // payments list. The signed callback binds this payment ID to the link;
+    // fetch the payment itself and require it to be captured for the exact
+    // transaction amount before confirming the order.
+    if (link.status !== "paid" || link.amount !== transaction.amount_paise || link.amount_paid !== transaction.amount_paise || link.currency !== transaction.currency || payment.id !== paymentId || payment.amount !== transaction.amount_paise || payment.currency !== transaction.currency || payment.status !== "captured" || !payment.captured) throw new Error("PAYMENT_NOT_CAPTURED");
   } else {
     const orderIdValue = text(body.razorpay_order_id, 100);
     if (orderIdValue !== transaction.razorpay_order_id || !verifyRazorpaySignature(credentials.keySecret, `${orderIdValue}|${paymentId}`, signature)) throw new Error("PAYMENT_VERIFICATION_FAILED");
