@@ -80,7 +80,15 @@ export async function createCentralPayment(request: NextRequest, rawBody: string
   const website = await authenticateSite(request, rawBody, "/api/payment/create-order");
   const body = JSON.parse(rawBody) as Record<string, unknown>;
   if (text(body.site_code, 64).toUpperCase() !== website.site_code) throw new Error("SITE_AUTH_FAILED");
-  if (website.payment_provider === "cashfree") return createCashfreeCentralPayment(website, body);
+  // Browser checkouts keep using the website's configured default provider.
+  // Trusted mobile wrappers can explicitly select either account already
+  // assigned to this website, without exposing credentials to the app.
+  const requestedProvider = text(body.provider, 20).toLowerCase();
+  if (requestedProvider && requestedProvider !== "razorpay" && requestedProvider !== "cashfree") {
+    throw new Error("INVALID_PAYMENT_REQUEST");
+  }
+  const paymentProvider = requestedProvider || website.payment_provider;
+  if (paymentProvider === "cashfree") return createCashfreeCentralPayment(website, body);
   if (!website.razorpay_account_id) throw new Error("PAYMENT_UNAVAILABLE");
   const accounts = await sql`SELECT id, status FROM razorpay_accounts WHERE id = ${website.razorpay_account_id}`;
   if (!accounts[0] || accounts[0].status !== "active") throw new Error("PAYMENT_UNAVAILABLE");
