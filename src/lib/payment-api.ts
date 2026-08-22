@@ -41,8 +41,8 @@ function publicTransaction(row: Transaction, keyId: string) {
   };
 }
 
-function publicCashfreeTransaction(row: CashfreeTransaction) {
-  return { success: true, provider: "cashfree", internal_order_id: row.internal_order_id, order_id: row.cashfree_order_id, payment_session_id: row.payment_session_id || undefined, payment_link: row.checkout_url || undefined, amount: Number(row.amount_paise), currency: row.currency, status: row.status };
+function publicCashfreeTransaction(row: CashfreeTransaction, mode: "sandbox" | "production") {
+  return { success: true, provider: "cashfree", cashfree_mode: mode, internal_order_id: row.internal_order_id, order_id: row.cashfree_order_id, payment_session_id: row.payment_session_id || undefined, payment_link: row.checkout_url || undefined, amount: Number(row.amount_paise), currency: row.currency, status: row.status };
 }
 
 async function createCashfreeCentralPayment(website: { id: string; site_code: string; domain: string; cashfree_account_id: string | null }, body: Record<string, unknown>) {
@@ -50,9 +50,9 @@ async function createCashfreeCentralPayment(website: { id: string; site_code: st
   const accountRows = await sql`SELECT id, status FROM cashfree_accounts WHERE id = ${website.cashfree_account_id}`;
   if (!accountRows[0] || accountRows[0].status !== "active") throw new Error("PAYMENT_UNAVAILABLE");
   const internalOrderId = orderId(body.internal_order_id); const amountPaise = amount(body.amount); const paymentCurrency = currency(body.currency);
-  const existingRows = await sql`SELECT * FROM cashfree_transactions WHERE website_id = ${website.id} AND internal_order_id = ${internalOrderId}`;
-  if (existingRows[0]) return publicCashfreeTransaction(existingRows[0] as CashfreeTransaction);
   const credentials = await cashfreeCredentialForAccount(website.cashfree_account_id);
+  const existingRows = await sql`SELECT * FROM cashfree_transactions WHERE website_id = ${website.id} AND internal_order_id = ${internalOrderId}`;
+  if (existingRows[0]) return publicCashfreeTransaction(existingRows[0] as CashfreeTransaction, credentials.mode);
   const txId = randomUUID(); const cashfreeOrderId = `pm_${txId.replace(/-/g, "")}`;
   const customerInput = (body.customer && typeof body.customer === "object" ? body.customer : {}) as Record<string, unknown>;
   const phone = text(customerInput.contact || customerInput.phone, 15).replace(/\D/g, "").slice(-10);
@@ -73,7 +73,7 @@ async function createCashfreeCentralPayment(website: { id: string; site_code: st
   const hosted = payload.payment_link ? new URL(payload.payment_link) : null;
   const link = hosted && hosted.protocol === "https:" && (hosted.hostname === "cashfree.com" || hosted.hostname.endsWith(".cashfree.com")) ? hosted.toString() : null;
   await sql`INSERT INTO cashfree_transactions (id, website_id, cashfree_account_id, cashfree_credential_version_id, internal_order_id, cashfree_order_id, payment_session_id, checkout_url, amount_paise, currency, status) VALUES (${txId}, ${website.id}, ${website.cashfree_account_id}, ${credentials.version.id}, ${internalOrderId}, ${cashfreeOrderId}, ${payload.payment_session_id || null}, ${link}, ${amountPaise}, ${paymentCurrency}, 'pending')`;
-  return publicCashfreeTransaction({ id: txId, website_id: website.id, cashfree_account_id: website.cashfree_account_id, cashfree_credential_version_id: credentials.version.id, internal_order_id: internalOrderId, cashfree_order_id: cashfreeOrderId, payment_session_id: payload.payment_session_id || null, checkout_url: link, amount_paise: amountPaise, currency: paymentCurrency, status: "pending" });
+  return publicCashfreeTransaction({ id: txId, website_id: website.id, cashfree_account_id: website.cashfree_account_id, cashfree_credential_version_id: credentials.version.id, internal_order_id: internalOrderId, cashfree_order_id: cashfreeOrderId, payment_session_id: payload.payment_session_id || null, checkout_url: link, amount_paise: amountPaise, currency: paymentCurrency, status: "pending" }, credentials.mode);
 }
 
 export async function createCentralPayment(request: NextRequest, rawBody: string) {
